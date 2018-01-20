@@ -1,0 +1,165 @@
+\documentclass[10pt, letterpaper, twoside, english]{article}
+\usepackage{amsmath}
+\usepackage{amscd}
+\usepackage[tableposition=top]{caption}
+\usepackage{fullpage}
+\usepackage{array} 
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\pdfpageheight\paperheight
+\pdfpagewidth\paperwidth
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+\title{Identification of Neurodegenerative Factors Using Translatome-Interactome Analysis : Documentation}
+\author{William Shin}
+\maketitle
+\section{Introduction}
+This document is designed to outline the set-up and running of MARINa on the saline- and MPTP-specific translatomes. When compiled, the document will run the computational analysis described in the manuscript and output the results as a table and plot (corresponding to Figure 3C in the main text). 
+\subsection{Installing the MARINa package}
+The version of MARINa that was used in this analysis can be found as part of the ssMarina package, which can be downloaded through figshare \url{http://dx.doi.org/10.6084/m9.figshare.785718}, as well as DESeq, which is used for the normalization of the RNASEQ dataset. An additional package called xtable is also required for the correct display of the results tables. In a new R-session, the libraries can be opened with the following commands: 
+
+<<label=loadMarina, eval=TRUE, echo=TRUE,output=tex>>=
+library(ssmarina)
+library(DESeq)
+library(xtable) # needed for printing out the MARINA results later
+@
+
+<<label=FunctionsNeededToRunNormalization,eval=TRUE, echo=FALSE>>=
+f.rlength.na <- function (x)
+{
+    r <- x/x
+    r[x == 0] <- 1
+    r[!is.finite(r)] <- 0
+    r %*% rep(1, ncol(r))
+}
+f.rmean.na <-function (x)
+{
+    largo <- f.rlength.na(x)
+    x[is.na(x)] <- 0
+    res <- x %*% rep(1, ncol(x))/largo
+    names(res) <- rownames(x)
+    res
+}
+ f.rvar.na <- function (x)
+ {
+     ave <- as.vector(f.rmean.na(x))
+     pos <- which(is.na(x))
+     largo <- f.rlength.na(x)
+     x[pos] <- rep(ave, ncol(x))[pos]
+     (x - ave)^2 %*% rep(1, ncol(x))/(largo - 1)
+ }
+DEtransform <- function (x)
+{
+    if (class(x) != "CountDataSet") {
+        if (class(x) != "matrix")
+            stop("x must be a CountDataSet or integer matrix object",
+                call. = F)
+        x <- newCountDataSet(x, factor(colnames(x)))
+    }
+    x <- estimateSizeFactors(x)
+    x <- estimateDispersions(x, method = "blind")
+    x <- getVarianceStabilizedData(x)
+    tmp <- apply(x, 2, function(x) {
+        x <- sort(unique(x))
+        x <- cbind(x[1:(length(x) - 1)], x[2:length(x)])
+        x <- cbind(x[, 1], sqrt(f.rvar.na(x)))
+        return(x)
+    })
+    tmp <- cbind(unlist(lapply(tmp, function(x) x[, 1]), use.names = F),
+        unlist(lapply(tmp, function(x) x[, 2]), use.names = F))
+    tmp1 <- smooth.spline(tmp[, 1], tmp[, 2], spar = 0.5)
+    tmp[tmp[, 1] > tmp1$x[which.min(tmp1$y)], 2] <- 0
+    tmp1 <- smooth.spline(tmp[, 1], tmp[, 2], spar = 0.5)
+    return(x + rnorm(length(x)) * predict(tmp1, x)$y)
+}
+@
+
+\section{Run MARINa and Output Results}
+The following code is use to to load the expression file and interactome, run MARINa,  output the results as a table and plot. The code itself has the following structure : 
+\begin{enumerate}
+\item The function loads the regulon and expression file, and stores the annotation information. 
+\item The function performs the normalization of the expression file using DETransform.
+\item The function then generates the null distrubution by shuffling the sample labels 1000 times. 
+\item The function runs marina with the regulon, signature, and null distribution. 
+\item The MARINa results are also annotated, which allows the gene names to be displayed in the pdf file.
+\item The table of the full MARINa results is generated and printed.
+\item The pdf plot file of the MARINa results is also generated and printed.
+\item The function outputs the identity and differential expression of the ARACNe-predicted targets for each MR as a table.
+\end{enumerate}
+
+<<label=loadFiles, eval=F, echo=TRUE, output=tex>>=
+# reading in the regulon and expression file 
+load("mus_brain_regulon.rda")
+dset = read.table("Parkinsons_CountFile_20141110_annot.txt", header=T, sep="\t",as.is=T)
+
+#storing annotation information
+entrez2symbol<-dset[,2]
+names(entrez2symbol)<- as.character(dset[,1])
+symbol2entrez <- as.character(dset[,1])
+names(symbol2entrez) <- dset[,2]
+
+# convert expression file to matrix
+dset.matrix = as.matrix(dset[,3:ncol(dset)])
+dset = dset.matrix
+rownames(dset) = names(entrez2symbol)
+
+# DE transform to perform normalization
+dset.DESeq = newCountDataSet( countData = dset, conditions =  rep(1, ncol(dset)))
+dset.DEtransformed = DEtransform(dset.DESeq)
+dset = dset.DEtransformed
+
+# samples for day-4 after MPTP treatment
+Treatment_4 = grep( "M+._4$", colnames(dset))
+Control_4 = grep( "S+._4$", colnames(dset))
+
+# generate signature, null distribution, and run marina
+signature <- rowTtest( dset[, Treatment_4], dset[, Control_4], alternative="two.sided")$statistic
+dnull = ttestNull( dset[ , Treatment_4] , dset[ ,  Control_4] , per = 1000, verbose=F, seed=539 )
+marina_results <- marina(signature, regul, dnull, minsize=20,verbose=F)
+marina_results_annot = marinaAnnot(marina_results, entrez2symbol) # annotate results
+
+# table to print out the full MARINa Results.
+toPrint = data.frame( names(marina_results_annot$es$nes), 
+                      marina_results_annot$es$nes,
+                      marina_results_annot$es$p.value )
+colnames( toPrint ) = c("Entrez", "NES", "pvalue")
+sortedind = sort(toPrint$NES, index.return = T, decreasing=T)
+toPrint = toPrint[sortedind$ix, ]
+toPrint.sig = toPrint[which(toPrint$pvalue < 0.01),]
+
+# writing table of full results
+write.table( toPrint.sig, file="MarinaResults.txt", sep="\t", quote=F, row.names=F)
+
+# find significant results 
+# generating the pdf of the significant (pvalue < 0.01) MR candidates
+num = length(toPrint$pvalue[which(toPrint$pvalue < 0.01)])
+# setting the size of the pdf file
+height_num  = ceiling( num / 5 )
+if(height_num < 5){
+  height_num = 5
+}
+# plot the significant MR results as a pdf file.
+pdf("MarinaResults_Final.pdf", height = height_num)
+plot(marina_results_annot, num)
+dev.off()
+@
+
+\pagebreak
+\begin{figure}
+\begin{center}
+\includegraphics[]{MarinaResults_Final.pdf}
+\caption{MR Candidates for saline- and MPTP-specific translatomes}
+\end{center}
+\end{figure}
+\clearpage
+
+<< label=WriteSignificantMRTable, echo=F, eval=T, results=tex >>=
+  data = read.table("MarinaResults_Final.txt", header=T, as.is=T, sep="\t")
+  data.sig = data[which(data$pvalue < 0.01),]
+  outtable <- xtable(data.sig , caption = "MR candidates for saline- and MPTP-specific translatomes", floating = FALSE, label = "MPTPday4", digits =c(0,0,3,3))
+  print(outtable, include.rownames=F, tabular.environment = "longtable")
+@
+
+\end{document}
